@@ -1,0 +1,11 @@
+# Reference-photo cache written by pregen.py during local generation.
+.cache/
+references/
+# Python venv for running the pipeline locally.
+.venv/
+venv/
+__pycache__/
+*.pyc
+# Release scratch (pipeline.tar.gz is built in CI, never committed).
+*.tar.gz
+.DS_Store

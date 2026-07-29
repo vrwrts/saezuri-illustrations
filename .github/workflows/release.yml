@@ -1,0 +1,35 @@
+name: Release pipeline
+
+# Versions the generation pipeline (NOT the art). Triggered only by pipeline/**
+# changes, so the constant stream of art PRs never cuts a release. On a releasable
+# Conventional Commit (feat/fix/perf/breaking), semantic-release tags vX.Y.Z, cuts a
+# GitHub Release, and attaches pipeline.tar.gz — the asset the saezuri app pins via
+# PIPELINE_VERSION and vendors into its image at build time.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pipeline/**'
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # tag + GitHub Release + upload asset
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # semantic-release needs full history + tags
+      # Build the asset before semantic-release runs, so @semantic-release/github
+      # can attach it (tar of the pipeline/ dir → app unpacks it to /opt/saezuri/pipeline).
+      - name: Package pipeline
+        run: tar czf pipeline.tar.gz pipeline
+      - uses: cycjimmy/semantic-release-action@v4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
