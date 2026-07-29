@@ -6,6 +6,8 @@ name: Release pipeline
 # GitHub Release, and attaches pipeline.tar.gz — the asset the saezuri app pins via
 # PIPELINE_VERSION and vendors into its image at build time.
 on:
+  workflow_dispatch:   # manual "Run workflow" button (ignores the paths filter) —
+                       # used to cut the first release, and to re-run on demand
   push:
     branches: [main]
     paths:
