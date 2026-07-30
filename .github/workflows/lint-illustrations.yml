@@ -33,31 +33,33 @@ jobs:
           echo '${{ github.event.pull_request.number }}' > pr-number
           # A hidden marker so the comment workflow can find + update its own comment.
           marker='<!-- illustration-lint -->'
-          if [ "${#pngs[@]}" -eq 0 ]; then
-            printf '%s\n## 🖼️ Illustration lint\n\nNo illustration PNGs changed.\n' "$marker" > report.md
+          n=${#pngs[@]}
+          if [ "$n" -eq 0 ]; then
+            printf '%s\nThis pull request changes no illustrations.\n' "$marker" > report.md
             cat report.md >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           set +e
-          out="$(bash scripts/validate.sh "${pngs[@]}" 2>&1)"
+          tsv="$(bash scripts/validate.sh --tsv "${pngs[@]}")"
           rc=$?
           set -e
-          if [ "$rc" -ne 0 ]; then
-            status='❌ **Errors found — please fix.**'
-          elif printf '%s' "$out" | grep -q '⚠'; then
-            status='⚠️ **Passed with warnings.**'
-          else
-            status='✅ **All good.**'
-          fi
           {
             echo "$marker"
-            echo '## 🖼️ Illustration lint'
+            echo "This pull request adds **$n** image(s):"
             echo
-            echo "$status"
-            echo
-            echo '```'
-            echo "$out"
-            echo '```'
+            echo '| Filename | Status | Comment |'
+            echo '| --- | :---: | --- |'
+            while IFS=$'\t' read -r status file msg; do
+              [ -n "$file" ] || continue
+              case "$status" in
+                pass) emoji='✅' ;;
+                warn) emoji='⚠️' ;;
+                fail) emoji='❌' ;;
+                *) emoji="$status" ;;
+              esac
+              msg=${msg//|/\\|} # escape pipes so a message can't break the table
+              echo "| \`$file\` | $emoji | $msg |"
+            done <<< "$tsv"
           } > report.md
           cat report.md >> "$GITHUB_STEP_SUMMARY"
           exit "$rc" # fail the check on errors (warnings pass)
