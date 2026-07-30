@@ -1,0 +1,44 @@
+name: PR lint comment
+
+# Posts the illustration-lint result as a single sticky comment on the PR, updating it
+# in place on re-runs. Separate from the lint workflow because commenting needs a write
+# token, which fork pull_request runs don't get. Here we run in the base-repo context
+# (write token) triggered by the lint's completion, and ONLY read its report artifact —
+# no PR code is ever checked out or executed with that token.
+on:
+  workflow_run:
+    workflows: ['Lint illustrations']
+    types: [completed]
+
+permissions:
+  actions: read # download the lint run's report artifact
+  pull-requests: write # post/update the sticky comment
+
+jobs:
+  comment:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the lint report
+        uses: actions/download-artifact@v4
+        with:
+          name: lint-report
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Read the PR number
+        id: meta
+        run: echo "pr=$(cat pr-number)" >> "$GITHUB_OUTPUT"
+      - name: Find our previous comment
+        id: found
+        uses: peter-evans/find-comment@v3
+        with:
+          issue-number: ${{ steps.meta.outputs.pr }}
+          comment-author: 'github-actions[bot]'
+          body-includes: '<!-- illustration-lint -->'
+      - name: Create or update the sticky comment
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.found.outputs.comment-id }}
+          issue-number: ${{ steps.meta.outputs.pr }}
+          body-path: report.md
+          edit-mode: replace # overwrite with the latest lint result

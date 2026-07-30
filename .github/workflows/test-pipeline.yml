@@ -1,0 +1,23 @@
+name: Test pipeline
+
+# Runs the pipeline's unit tests — only when the pipeline changes, via GitHub's native
+# path filter (no in-job self-check). Split from the illustration lint so each uses its
+# own paths filter.
+on:
+  pull_request:
+    paths:
+      - 'pipeline/**'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install --quiet -r pipeline/requirements.txt
+      - working-directory: pipeline
+        run: |
+          python matte_test.py
+          python worker_test.py
