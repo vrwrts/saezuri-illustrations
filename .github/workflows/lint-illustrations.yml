@@ -1,0 +1,72 @@
+name: Lint illustrations
+
+# Lints the illustration PNGs a PR changes. Result is surfaced two ways: the job
+# summary here, and a sticky PR comment posted by the companion pr-comment.yml.
+#
+# Why the comment lives in a SEPARATE workflow: a pull_request run from a fork gets a
+# READ-ONLY token (a GitHub security rule), so it can't comment. This workflow runs
+# the untrusted PR content read-only and just emits a report artifact; pr-comment.yml
+# (workflow_run, write token, never checks out PR code) turns it into the comment.
+#
+# A lint for honest mistakes, not a trust gate — real trust is human review (CONTRIBUTING.md).
+on:
+  pull_request:
+    paths:
+      - 'illustrations/**'
+      - 'scripts/validate.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need the base commit to diff changed images
+      - run: pip install --quiet -r pipeline/requirements.txt
+      - name: Lint changed PNGs
+        run: |
+          base='${{ github.event.pull_request.base.sha }}'
+          mapfile -t pngs < <(git diff --name-only --diff-filter=d "$base" HEAD -- 'illustrations/*.png')
+          echo '${{ github.event.pull_request.number }}' > pr-number
+          # A hidden marker so the comment workflow can find + update its own comment.
+          marker='<!-- illustration-lint -->'
+          if [ "${#pngs[@]}" -eq 0 ]; then
+            printf '%s\n## 🖼️ Illustration lint\n\nNo illustration PNGs changed.\n' "$marker" > report.md
+            cat report.md >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          set +e
+          out="$(bash scripts/validate.sh "${pngs[@]}" 2>&1)"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            status='❌ **Errors found — please fix.**'
+          elif printf '%s' "$out" | grep -q '⚠'; then
+            status='⚠️ **Passed with warnings.**'
+          else
+            status='✅ **All good.**'
+          fi
+          {
+            echo "$marker"
+            echo '## 🖼️ Illustration lint'
+            echo
+            echo "$status"
+            echo
+            echo '```'
+            echo "$out"
+            echo '```'
+          } > report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc" # fail the check on errors (warnings pass)
+      - name: Upload report for the comment workflow
+        if: always() # also upload when the lint step failed, so the comment shows the errors
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report
+          path: |
+            report.md
+            pr-number
+          retention-days: 3
