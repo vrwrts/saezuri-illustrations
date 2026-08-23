@@ -15,6 +15,7 @@
 # that into the PR-comment table. Either mode exits non-zero if any image fails.
 #
 # Checks each PNG: basename is a valid slug (slug or slug-2, never underscore-prefixed),
+# both poses of the species are present in the same folder (<slug>.png and <slug>-2.png),
 # Pillow-decodable, and within a sane pixel cap (decompression-bomb guard, matching the
 # pipeline's build_masks). A fully-opaque image is a warning — cutouts should be transparent.
 set -euo pipefail
@@ -62,6 +63,12 @@ def check(p: Path):
     name = p.name
     if name.startswith("_") or not NAME.fullmatch(name):
         return "fail", "invalid name (want <slug>.png or <slug>-2.png, [a-z0-9-] only)"
+    # Both poses must ship together. Resolve against the folder on disk, not the argument
+    # list, so a PR adding one pose next to an existing counterpart still passes.
+    slug = p.stem.removesuffix("-2")
+    for counterpart in (f"{slug}.png", f"{slug}-2.png"):
+        if not (p.parent / counterpart).exists():
+            return "fail", f"missing counterpart {counterpart}"
     try:
         with Image.open(p) as im:
             w, h = im.size

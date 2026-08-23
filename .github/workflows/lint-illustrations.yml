@@ -29,7 +29,17 @@ jobs:
       - name: Lint changed PNGs
         run: |
           base='${{ github.event.pull_request.base.sha }}'
-          mapfile -t pngs < <(git diff --name-only --diff-filter=d "$base" HEAD -- 'illustrations/*.png')
+          # Expand the changed files to whole species: both poses of every touched slug,
+          # so the pairing check sees a missing counterpart — including when a PR deletes
+          # one pose (deletions are kept in the diff for exactly that reason). Names that
+          # no longer exist in the tree are dropped; deleting both poses lints nothing.
+          mapfile -t pngs < <(
+            git diff --name-only "$base" HEAD -- 'illustrations/*.png' \
+              | sed -E 's#(-2)?\.png$##' | sort -u \
+              | while read -r slug; do
+                  for f in "$slug.png" "$slug-2.png"; do [ -e "$f" ] && echo "$f"; done
+                done
+          )
           echo '${{ github.event.pull_request.number }}' > pr-number
           # A hidden marker so the comment workflow can find + update its own comment.
           marker='<!-- illustration-lint -->'
@@ -45,7 +55,7 @@ jobs:
           set -e
           {
             echo "$marker"
-            echo "This pull request adds **$n** image(s):"
+            echo "This pull request checks **$n** image(s):"
             echo
             echo '| Filename | Status | Comment |'
             echo '| --- | :---: | --- |'
