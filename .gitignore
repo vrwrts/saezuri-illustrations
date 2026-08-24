@@ -9,3 +9,4 @@ __pycache__/
 # Release scratch (pipeline.tar.gz is built in CI, never committed).
 *.tar.gz
 .DS_Store
+illustrations/_fallback.png
