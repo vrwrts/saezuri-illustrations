@@ -9,22 +9,39 @@ the BirdNET-Go relationship and decides *what* is missing; this script only does
 the generation, so a change to the art style or mask format stays a one-file fix
 in pregen.py / matte.py / build_masks.py.
 
-Generation reuses the existing scripts verbatim (pregen -> matte -> build_masks).
+Generation reuses the existing scripts (pregen --matte -> build_masks). pregen
+cuts the magenta ground out of each render in memory before writing it, so the
+served directory only ever receives finished cutouts; --repair cleans up files
+left half-done by older versions that matted in a second pass.
+
 Only public read endpoints of BirdNET-Go are ever touched (by the service, not
 here); nothing is written back to it.
 
 Usage:
-    # generate art for two species, then rebuild the manifest:
+    # generate art for two species (both poses), then rebuild the manifest:
     python3 worker.py --generate "Turdus merula|Blackbird" "Parus major|Great tit"
+
+    # one pose only, with an operator notes file layered over the bundled one -
+    # how the refresh service calls this:
+    python3 worker.py --generate "Turdus merula|Blackbird" --poses 1 \
+        --notes /data/illustrations/_species-notes.json
+
+    # re-render a pose after editing its note:
+    python3 worker.py --generate "Turdus merula|Blackbird" --poses 1 --force
 
     # just (ensure fallback +) rebuild the manifest, no generation:
     python3 worker.py --rebuild
+
+    # matte anything left opaque by an older pipeline, then rebuild:
+    python3 worker.py --repair
 
 Env:
     GEMINI_API_KEY   required for --generate; unset => error (the service only
                      calls --generate when a key is set).
     GENERATE_SLEEP   seconds between image-API calls (passed to pregen --sleep).
-                     Unset => pregen's default 6s, to stay under the free tier.
+                     Only bites when one invocation covers several images; the
+                     refresh service asks for one pose at a time and paces the
+                     calls itself.
 """
 from __future__ import annotations
 import argparse
@@ -36,7 +53,7 @@ from pathlib import Path
 
 # slugify is the canonical scientific-name -> filename join key, kept in parity
 # with the frontend (src/domain/slug.ts) and the rest of the pipeline.
-from pregen import slugify
+from pregen import BUNDLED_NOTES, slugify
 
 HERE = Path(__file__).resolve().parent
 PREGEN = HERE / "pregen.py"
@@ -112,47 +129,75 @@ def generate(
     assets_dir: Path,
     refs_dir: Path,
     gemini_key: str,
+    poses: list[int],
+    notes_paths: list[Path],
+    force: bool = False,
 ) -> None:
-    """Render + matte the missing species. pregen renders both poses on the flat
-    magenta ground; matte.py removes it (region matte in numpy/scipy - no heavy
-    model) and crops, writing the RGBA cutout back in place. Any failure is
-    logged with its exit code."""
-    args = [str(PREGEN), "--out", str(assets_dir), "--refs", str(refs_dir)]
+    """Render the requested species/poses as finished cutouts.
+
+    pregen renders on the flat magenta ground and, with --matte, cuts it out in
+    memory before writing - so the served directory only ever receives RGBA
+    cutouts. Doing it there rather than in a second pass here is what keeps a
+    killed run from stranding a magenta rectangle under a real filename (see
+    --repair for cleaning up files left by older versions)."""
+    args = [str(PREGEN), "--out", str(assets_dir), "--refs", str(refs_dir), "--matte"]
     if STYLES_DIR.is_dir():
         args += ["--styles", str(STYLES_DIR)]
+    for notes_path in notes_paths:
+        args += ["--notes", str(notes_path)]
+    if force:
+        args += ["--force"]
     # Throttle image-API calls to stay within the Gemini free-tier rate limit.
-    # Unset => pregen's own default (6s between calls), i.e. identical to a manual
-    # pipeline run; raise it if your tier is tighter.
+    # Only bites when this invocation covers more than one image; the refresh
+    # service calls us one pose at a time and paces the calls itself.
     sleep = os.environ.get("GENERATE_SLEEP", "").strip()
     if sleep:
         args += ["--sleep", sleep]
     for sci, com, _ in missing:
         args += ["--species", f"{sci}|{com}"]
-    args += ["--poses", "1", "2"]
+    args += ["--poses", *[str(p) for p in poses]]
     env = {**os.environ, "GEMINI_API_KEY": gemini_key}
     _run(args, env=env)
 
-    # Matte each rendered pose IN PLACE. matte.py is lightweight (numpy/scipy),
-    # so unlike the old BiRefNet cutout there's no per-process OOM concern; it
-    # skips files that are already transparent, so re-runs stay cheap. The exit
-    # code is logged so a bad render is distinguishable from a matte error.
-    pose_files = [
-        f"{slug}{suf}"
-        for _, _, slug in missing
-        for suf in POSE_SUFFIXES
-        if (assets_dir / f"{slug}{suf}.png").exists()
-    ]
-    failed: list[str] = []
-    for pose in pose_files:
-        p = str(assets_dir / f"{pose}.png")
-        rc = _run([str(MATTE), "--region", p, "--out", p])
+
+def repair(assets_dir: Path) -> int:
+    """Matte any cutout that is still fully opaque, and report how many were
+    rewritten.
+
+    Older pipeline versions wrote the magenta render under its real filename and
+    matted it in a second pass, so a run killed in between left a permanent
+    magenta rectangle that nothing would ever revisit. region_cut skips files
+    that already have transparency, so this is cheap to run over a whole
+    directory."""
+    candidates = [p for p in sorted(assets_dir.glob("*.png"))
+                  if not p.stem.startswith("_")]
+    repaired = 0
+    for path in candidates:
+        if _is_transparent(path):
+            continue
+        rc = _run([str(MATTE), "--region", str(path), "--out", str(path)])
         if rc != 0:
-            failed.append(pose)
-            print(f"saezuri-worker: matte FAILED for {pose}.png (exit {rc}); "
-                  f"magenta ground left uncut", file=sys.stderr)
-    if failed:
-        print(f"saezuri-worker: matte failed for {len(failed)}/{len(pose_files)} "
-              f"pose(s): {', '.join(failed)}", file=sys.stderr)
+            print(f"saezuri-worker: repair FAILED for {path.name} (exit {rc})",
+                  file=sys.stderr)
+            continue
+        repaired += 1
+    print(f"saezuri-worker: repaired {repaired}/{len(candidates)} cutout(s)")
+    return repaired
+
+
+def _is_transparent(path: Path) -> bool:
+    """True when the PNG already carries an alpha channel with transparent
+    pixels, i.e. it has been matted. Unreadable files are reported as matted so
+    repair leaves them for build_masks to skip and report."""
+    try:
+        from PIL import Image
+        im = Image.open(path)
+        im.load()
+        return im.mode == "RGBA" and im.getchannel("A").getextrema()[0] == 0
+    except Exception as e:  # noqa: BLE001 - any decode failure
+        print(f"saezuri-worker: cannot read {path.name} ({e}); leaving it alone",
+              file=sys.stderr)
+        return True
 
 
 def main() -> int:
@@ -165,10 +210,20 @@ def main() -> int:
                          "then rebuild the manifest.")
     ap.add_argument("--rebuild", action="store_true",
                     help="Ensure the fallback + rebuild the manifest and exit (no generation).")
+    ap.add_argument("--repair", action="store_true",
+                    help="Matte any cutout left fully opaque by an older pipeline version, "
+                         "rebuild the manifest, and exit (no generation).")
     ap.add_argument("--assets-dir", type=Path, default=DEFAULT_ASSETS_DIR,
                     help="Served illustration directory (default: the container path)")
     ap.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR,
                     help="Writable cache for fetched Wikipedia reference photos")
+    ap.add_argument("--poses", nargs="+", type=int, default=[1, 2], choices=[1, 2],
+                    help="Which poses to generate. 1=perched, 2=flight. Default: both.")
+    ap.add_argument("--notes", type=Path, action="append", default=None, metavar="PATH",
+                    help="Operator prompt-addenda file, layered over the bundled "
+                         "species-notes.json. Repeatable; later files win per key.")
+    ap.add_argument("--force", action="store_true",
+                    help="Re-render even if the pose already exists (use after editing a note).")
     ap.add_argument("--max-per-cycle", type=int, default=0,
                     help="Cap species generated this run (0 = no cap).")
     args = ap.parse_args()
@@ -181,6 +236,12 @@ def main() -> int:
     # A valid manifest must always exist so the frontend fetches a real file
     # (built from whatever art is present - initially just the fallback).
     ensure_fallback(assets_dir)
+
+    if args.repair:
+        repair(assets_dir)
+        rebuild_manifest(assets_dir)
+        print("saezuri-worker: manifest rebuilt")
+        return 0
 
     species = parse_species_args(args.generate or [])
     if not species:
@@ -198,12 +259,18 @@ def main() -> int:
         species = species[:args.max_per_cycle]
 
     seed_anti_refs(refs_dir)
+    # Bundled notes first, the operator's own layered over them, so a local
+    # tweak wins without having to restate what the pipeline already knows.
+    notes_paths = [BUNDLED_NOTES, *(args.notes or [])]
     missing = [(sci, com, slugify(sci)) for sci, com in species]
-    generate(missing, assets_dir, refs_dir, gemini_key)
-    # Count how many now have a perched cutout (what the frontend keys art on).
-    generated = sum(1 for _, _, slug in missing if (assets_dir / f"{slug}.png").exists())
+    generate(missing, assets_dir, refs_dir, gemini_key,
+             poses=args.poses, notes_paths=notes_paths, force=args.force)
+    # Count the poses that actually landed, not the species: the service asks for
+    # one pose at a time, so a species count would read 0/1 for a flight render.
+    wanted = [(slug, POSE_SUFFIXES[pose - 1]) for _, _, slug in missing for pose in args.poses]
+    landed = sum(1 for slug, suf in wanted if (assets_dir / f"{slug}{suf}.png").exists())
     rebuild_manifest(assets_dir)
-    print(f"saezuri-worker: generated {generated}/{len(missing)} species; manifest rebuilt")
+    print(f"saezuri-worker: generated {landed}/{len(wanted)} pose(s); manifest rebuilt")
     return 0
 
 
