@@ -1,0 +1,7 @@
+{
+  "_": "Per-species prompt addenda. Each value is appended to the generation prompt as a final 'Species-specific note:' paragraph for that species only. Use it when a species reliably comes out wrong and the reference photo alone doesn't fix it.",
+  "_keys": "A key may be either the scientific name ('Turdus merula') or its slug ('turdus-merula'). The slug is what appears in the illustrations directory. Keys starting with an underscore are comments and are ignored.",
+  "_style": "Keep a note to one or two sentences describing what to draw, not what to avoid drawing. Contrastive 'do not look like X' handling already exists for jay and swallow drift (see ANTI_REFS in pregen.py); add a note for anatomy, plumage, posture, or proportion that the model gets wrong.",
+  "_layering": "An operator's own notes file is layered over this one, so a local key wins. If a note here is wrong or a local one works better, please open a PR against this file so every deployment benefits.",
+  "_regenerating": "Editing a note does not by itself replace existing art. The refresh service re-renders a pose when its note changes, but only for art it generated itself - art downloaded from this repo is left alone. Locally: pass --force."
+}

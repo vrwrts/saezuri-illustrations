@@ -111,31 +111,41 @@ def region_matte(img, edge_frac: float = 0.03, band: int = 4,
     return Image.fromarray(np.round(np.clip(rgba, 0, 1) * 255).astype(np.uint8), "RGBA")
 
 
+def matte_image(im, margin: float = 0.02, name: str = "image"):
+    """Region-matte an already-open magenta-ground image to a cropped RGBA cutout.
+
+    The in-memory half of region_cut. Split out so pregen can matte a render
+    before it is ever written to the served directory, without duplicating the
+    diagnostics below."""
+    rgba = region_matte(im)
+    lo, hi = rgba.getchannel("A").getextrema()
+    if hi == 0:
+        print(f"[matte] {name}: WARNING no foreground recovered",
+              file=sys.stderr)
+    elif lo >= 255:
+        print(f"[matte] {name}: WARNING nothing removed - no magenta "
+              f"ground detected (was it rendered on magenta?)", file=sys.stderr)
+    rgba = crop_to_alpha(rgba, margin)
+    print(f"  [matte] {name} -> {rgba.width}x{rgba.height} (alpha {lo}..{hi})")
+    return rgba
+
+
 def region_cut(src_path: Path, out_path: Path, margin: float = 0.02,
                force: bool = False) -> None:
     """Region-matte a single magenta-ground render to an RGBA cutout, crop, save.
 
     Idempotent: an image that already has transparency is left alone unless
-    `force`, so re-running the worker (which mattes in place) doesn't re-matte an
-    already-cut file - the same guard cutout.py had."""
+    `force`, so re-running over a directory doesn't re-matte an already-cut file
+    - the same guard cutout.py had."""
     from PIL import Image
     im = Image.open(src_path)
     im.load()
     if not force and im.mode == "RGBA" and im.getchannel("A").getextrema()[0] == 0:
         print(f"  [matte] {out_path.name}: already transparent - skipped", file=sys.stderr)
         return
-    rgba = region_matte(im)
-    lo, hi = rgba.getchannel("A").getextrema()
-    if hi == 0:
-        print(f"[matte] {out_path.name}: WARNING no foreground recovered",
-              file=sys.stderr)
-    elif lo >= 255:
-        print(f"[matte] {out_path.name}: WARNING nothing removed - no magenta "
-              f"ground detected (was it rendered on magenta?)", file=sys.stderr)
-    rgba = crop_to_alpha(rgba, margin)
+    rgba = matte_image(im, margin, out_path.name)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     rgba.save(out_path)
-    print(f"  [matte] {out_path.name} -> {rgba.width}x{rgba.height} (alpha {lo}..{hi})")
 
 
 def crop_to_alpha(img, margin: float):
