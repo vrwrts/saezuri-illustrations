@@ -75,6 +75,10 @@ GEMINI_URL = (
 )
 POSES = {1: "perched", 2: "in flight with wings spread"}
 
+# The community prompt-addenda layer, shipped with the pipeline. An operator's
+# own notes file is layered over this one (see load_species_notes).
+BUNDLED_NOTES = Path(__file__).resolve().parent / "species-notes.json"
+
 # Genera where Gemini's prior collapses to Blue Jay markings unless we
 # attach a Blue Jay anti-reference. Add to this set if you find another
 # blue-songbird genus that needs the contrastive nudge.
@@ -354,15 +358,71 @@ def select_anti_ref_key(sci: str) -> str | None:
     return None
 
 
-def load_species_notes(notes_path: Path) -> dict[str, str]:
-    """Load per-species prompt addenda. Keys are scientific names; values
-    are 1-2 sentence clarifications to inject when generating that
-    species. Returns {} if the notes file doesn't exist."""
-    if not notes_path.exists():
-        return {}
-    raw = json.loads(notes_path.read_text())
-    return {k: v for k, v in raw.items()
-            if not k.startswith("_") and isinstance(v, str)}
+def load_species_notes(*notes_paths: Path) -> dict[str, str]:
+    """Load per-species prompt addenda, layering the given files in order so a
+    later one overrides an earlier one per key.
+
+    That layering is the point: the bundled species-notes.json carries the
+    accumulated community knowledge and ships with the pipeline, while an
+    operator's own file sits on a writable volume and refines it locally. A key
+    the operator gets right is meant to be contributed back upstream, at which
+    point their local override becomes redundant rather than conflicting.
+
+    Keys may be either a scientific name or its slug (see note_for). Values are
+    1-2 sentence clarifications; `_`-prefixed keys are comments and non-string
+    values are dropped. A missing file contributes nothing."""
+    merged: dict[str, str] = {}
+    for notes_path in notes_paths:
+        if not notes_path or not notes_path.exists():
+            continue
+        try:
+            raw = json.loads(notes_path.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            # A typo in a hand-edited notes file must not abort a generation run.
+            print(f"[notes] warning: ignoring {notes_path} ({e})", file=sys.stderr)
+            continue
+        if not isinstance(raw, dict):
+            print(f"[notes] warning: ignoring {notes_path} (not a JSON object)", file=sys.stderr)
+            continue
+        merged.update({k: v for k, v in raw.items()
+                       if not k.startswith("_") and isinstance(v, str)})
+    return merged
+
+
+def write_render(path: Path, data: bytes, matte: bool, margin: float = 0.02) -> None:
+    """Write one render to its final name, optionally cutting the magenta ground
+    out first.
+
+    Written via a temporary sibling and os.replace so the final name only ever
+    appears as a finished cutout. That matters because `path` is usually the
+    directory nginx is serving and the layout manifest is built from: a partially
+    written or still-magenta file under the real name would be published, and a
+    run killed mid-write would strand it there permanently. The temp name keeps
+    its `.png.tmp` tail so the manifest's `*.png` scan never sees it."""
+    if not matte:
+        path.write_bytes(data)
+        return
+    import io
+
+    from PIL import Image
+
+    from matte import matte_image
+
+    im = Image.open(io.BytesIO(data))
+    im.load()
+    rgba = matte_image(im, margin, path.name)
+    tmp = path.with_name(path.name + ".tmp")
+    rgba.save(tmp, "PNG")
+    os.replace(tmp, path)
+
+
+def note_for(notes: dict[str, str], sci: str) -> str | None:
+    """Resolve a species' note by scientific name, falling back to its slug.
+
+    Slug keys are accepted because they are what an operator sees in the
+    illustrations directory when deciding which bird needs a nudge, and they
+    dodge the case and diacritic mistakes a hand-typed binomial invites."""
+    return notes.get(sci) or notes.get(slugify(sci))
 
 
 def load_anti_ref(refs_dir: Path, key: str = "bluejay") -> Path | None:
@@ -596,9 +656,17 @@ def main() -> int:
     ap.add_argument("--prompt", type=Path,
                     default=Path(__file__).resolve().parent / "prompt.template.md",
                     help="Prompt template path")
-    ap.add_argument("--notes", type=Path,
-                    default=Path(__file__).resolve().parent / "species-notes.json",
-                    help="Per-species prompt addenda for difficult cases (e.g. similar-species drift)")
+    ap.add_argument("--notes", type=Path, action="append", default=None,
+                    metavar="PATH",
+                    help="Per-species prompt addenda for difficult cases (e.g. similar-species "
+                         "drift). Repeatable; later files override earlier ones per key. "
+                         "Defaults to the bundled species-notes.json.")
+    ap.add_argument("--matte", action="store_true",
+                    help="Cut the magenta ground out of each render before writing it, so the "
+                         "output directory only ever receives finished RGBA cutouts. Needs "
+                         "numpy + scipy.")
+    ap.add_argument("--margin", type=float, default=0.02,
+                    help="With --matte, margin around the bird as a fraction of its long side")
     ap.add_argument("--poses", nargs="+", type=int, default=[1, 2],
                     choices=list(POSES.keys()),
                     help="Which poses to render. 1=perched, 2=flight. Default: both.")
@@ -647,7 +715,19 @@ def main() -> int:
             p = load_anti_ref(args.refs, key)
             if p:
                 anti_paths[key] = p
-    notes = load_species_notes(args.notes)
+    # Fail before the first paid API call rather than after, so a missing
+    # dependency costs nothing.
+    if args.matte:
+        try:
+            import numpy  # noqa: F401
+            import scipy  # noqa: F401
+        except ImportError:
+            print("error: --matte needs numpy + scipy (pip install -r requirements.txt)",
+                  file=sys.stderr)
+            return 2
+
+    notes_paths = args.notes or [BUNDLED_NOTES]
+    notes = load_species_notes(*notes_paths)
     if notes:
         print(f"[notes] loaded per-species addenda for {len(notes)} species")
 
@@ -685,13 +765,13 @@ def main() -> int:
                 data = gen_one(gemini_key, prompt, sci, com, pose,
                                positive_ref=pos_ref, anti_ref=anti,
                                anti_ref_key=anti_key_for_call,
-                               species_note=notes.get(sci),
+                               species_note=note_for(notes, sci),
                                style_ref=style_ref_path)
-                path.write_bytes(data)
+                write_render(path, data, args.matte, args.margin)
                 done += 1
                 refs_tag = "+ref" if pos_ref else ""
                 anti_tag = "+anti" if anti else ""
-                note_tag = "+note" if notes.get(sci) else ""
+                note_tag = "+note" if note_for(notes, sci) else ""
                 print(f"  [ok]   {fname} ({len(data)//1024} KB){refs_tag}{anti_tag}{note_tag}")
             except (urllib.error.HTTPError, urllib.error.URLError, RuntimeError) as e:
                 failed += 1
