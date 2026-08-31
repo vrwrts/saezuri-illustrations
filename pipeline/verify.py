@@ -4,7 +4,7 @@
 """AvianVisitors - adversarial species-ID + anatomy check on illustrations.
 
 An independent quality gate for the generated library. Each illustration
-goes through a fresh Gemini Vision call that is NOT told the target
+goes through a fresh vision-model call that is NOT told the target
 species: it's asked to identify the bird, count wings/legs/heads/tails,
 and flag any twig, perch, or anatomical anomaly. The guess is then
 compared to the intended species. This catches drift that passes a quick
@@ -15,26 +15,22 @@ Results are appended to verify-results.csv (slug, pose, target, guess,
 match, confidence, anatomy counts, flags).
 
 Usage:
-    export GEMINI_API_KEY='your-key'
+    export GENERATE_API_KEY='your-key'
     python3 verify.py --labels labels.txt                 # whole library
     python3 verify.py --labels labels.txt calypte-anna    # one slug
 """
 from __future__ import annotations
 import argparse
-import base64
 import json
-import os
 import re
 import sys
-import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
-GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-2.5-flash:generateContent"
-)
+import imageapi
+
+#: Vision, not image-out, so this check never uses GENERATE_MODEL: one variable
+#: cannot name both the model that draws and the model that grades.
+VERIFY_TIMEOUT_S = 120
 
 VERIFY_PROMPT = """You are a rigorous ornithologist examining a stylized kachō-e woodblock-style bird illustration. The bird in the image is intended to be a {target_com} ({target_sci}).
 
@@ -76,58 +72,36 @@ def load_labels(path: Path) -> dict[str, tuple[str, str]]:
     return out
 
 
-def call_gemini(api_key: str, parts: list) -> dict:
-    payload = {"contents": [{"parts": parts}]}
-    req = urllib.request.Request(
-        GEMINI_URL,
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
-    backoff = 4.0
-    for attempt in range(4):
-        try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                return json.loads(r.read())
-        except urllib.error.HTTPError as e:
-            if e.code in (429, 500, 502, 503, 504) and attempt < 3:
-                time.sleep(backoff); backoff *= 2; continue
-            raise RuntimeError(f"HTTP {e.code}: {e.read().decode(errors='ignore')[:300]}")
-        except urllib.error.URLError:
-            if attempt < 3:
-                time.sleep(backoff); backoff *= 2; continue
-            raise
-    raise RuntimeError("retries exhausted")
-
-
-def extract_json(resp: dict) -> dict | None:
-    for cand in resp.get("candidates", []):
-        for part in cand.get("content", {}).get("parts", []):
-            text = part.get("text", "").strip()
-            if not text:
-                continue
-            if text.startswith("```"):
-                lines = text.split("\n")
-                text = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+def extract_json(text: str) -> dict | None:
+    """The prompt asks for bare JSON, but models wrap it in fences or prose
+    often enough to be worth stripping both."""
+    text = text.strip()
+    if not text:
+        return None
+    if text.startswith("```"):
+        lines = text.split("\n")
+        text = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
             try:
-                return json.loads(text)
+                return json.loads(text[start:end + 1])
             except json.JSONDecodeError:
-                start, end = text.find("{"), text.rfind("}")
-                if start >= 0 and end > start:
-                    try:
-                        return json.loads(text[start:end + 1])
-                    except json.JSONDecodeError:
-                        pass
+                pass
     return None
 
 
-def verify_one(api_key: str, png: Path, sci: str, com: str) -> dict | None:
+def verify_one(api_url: str, api_key: str, model: str,
+               png: Path, sci: str, com: str) -> dict | None:
     parts = [
-        {"text": VERIFY_PROMPT.format(target_sci=sci, target_com=com)},
-        {"inlineData": {"mimeType": "image/png",
-                        "data": base64.b64encode(png.read_bytes()).decode()}},
+        imageapi.text_part(VERIFY_PROMPT.format(target_sci=sci, target_com=com)),
+        imageapi.image_part(png.read_bytes(), "image/png"),
     ]
-    return extract_json(call_gemini(api_key, parts))
+    resp = imageapi.chat(api_url, api_key, model, parts,
+                         timeout=VERIFY_TIMEOUT_S, label=png.name)
+    return extract_json(imageapi.first_text(resp))
 
 
 CSV_HEADER = ("slug,pose,target_sci,guessed_sci,guessed_com,matches,confidence,"
@@ -162,12 +136,20 @@ def main() -> int:
                     help="Illustration directory (default: avian/assets/illustrations/)")
     ap.add_argument("--out", type=Path, default=Path("verify-results.csv"),
                     help="CSV output path (default: ./verify-results.csv)")
-    ap.add_argument("--gemini-key", help="Gemini API key (or GEMINI_API_KEY env)")
+    ap.add_argument("--api-key", help=f"API key (or {imageapi.ENV_API_KEY} env)")
+    ap.add_argument("--api-url",
+                    help=f"OpenAI-compatible base URL (or {imageapi.ENV_API_URL} env; "
+                         f"default {imageapi.DEFAULT_API_URL})")
+    ap.add_argument("--model", default=imageapi.DEFAULT_VISION_MODEL,
+                    help="Vision model used to grade the art "
+                         f"(default {imageapi.DEFAULT_VISION_MODEL})")
     args = ap.parse_args()
 
-    api_key = args.gemini_key or os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
-        print("error: GEMINI_API_KEY required (--gemini-key or env)", file=sys.stderr)
+    try:
+        api_url, api_key, model = imageapi.resolve(
+            args.api_key, args.api_url, args.model, imageapi.DEFAULT_VISION_MODEL)
+    except imageapi.ConfigError as e:
+        print(f"error: {e}", file=sys.stderr)
         return 2
     labels = load_labels(args.labels)
 
@@ -178,7 +160,8 @@ def main() -> int:
     if not args.out.exists():
         args.out.write_text(CSV_HEADER)
 
-    print(f"verifying {len(pngs)} illustrations against {len(labels)} labels\n")
+    print(f"verifying {len(pngs)} illustrations against {len(labels)} labels "
+          f"({model} via {api_url})\n")
     mismatches = 0
     for png in pngs:
         if not png.exists():
@@ -191,7 +174,7 @@ def main() -> int:
             continue
         sci, com = labels[slug]
         try:
-            v = verify_one(api_key, png, sci, com)
+            v = verify_one(api_url, api_key, model, png, sci, com)
         except Exception as e:
             print(f"  [fail] {png.name}: {e}", file=sys.stderr)
             continue

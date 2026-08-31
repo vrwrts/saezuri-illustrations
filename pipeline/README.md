@@ -14,17 +14,35 @@ reimplements (see CLAUDE.md). The art and this tooling are **CC-BY-NC-SA-4.0**
 | `pregen.py`          | AvianVisitors (**adapted**) | Generate perched + flight illustrations for a species list. Adapted: `--matte` cuts each render before it is written, and `--notes` takes layered per-species prompt addenda. |
 | `matte.py`           | Saezuri (original*)  | Remove the magenta ground by **region matte** (numpy + scipy, no ML model) and crop to the bird. (*bbox-crop ported from AvianVisitors `cutout.py`.) |
 | `matte_test.py`      | Saezuri (original)   | Offline correctness tests for `matte.py` (no key/network needed).   |
-| `pregen_test.py`     | Saezuri (original)   | Offline tests for notes layering and render writing (no key/network needed). |
+| `pregen_test.py`     | Saezuri (original)   | Offline tests for notes layering, prompt assembly, and render writing (no key/network needed). |
+| `imageapi.py`        | Saezuri (original)   | OpenAI-compatible `chat/completions` client — the only place the model provider is known. |
+| `imageapi_test.py`   | Saezuri (original)   | Offline tests for `imageapi.py`, against a localhost stub server (no key/network needed). |
 | `species-notes.json` | Saezuri (original)   | Bundled per-species prompt addenda; an operator's file layers over it. |
 | `build_masks.py`     | AvianVisitors (**adapted**) | Build the silhouette masks. Adapted to emit a JSON manifest (below) instead of rewriting `apt.js`, and to add a fallback entry. |
-| `verify.py`          | AvianVisitors (verbatim) | Optional blind QA of each render via a vision model.             |
+| `verify.py`          | AvianVisitors (**adapted**) | Optional blind QA of each render via a vision model. Adapted to call through `imageapi.py`. |
 | `make_fallback.py`   | Saezuri (original)   | Draw the generic fallback silhouette (`_fallback.png`).             |
 
 ## Pipeline order
 
 `pregen.py --matte` → `build_masks.py` (`verify.py` optional). Generation needs
-`GEMINI_API_KEY`; the `requirements.txt` deps are just Pillow + numpy + scipy (no ML
-model), so the runtime image is `nginx:alpine`.
+`GENERATE_API_KEY`; the `requirements.txt` deps are just Pillow + numpy + scipy (no ML
+model and no vendor SDK), so the runtime image is `nginx:alpine`.
+
+## Choosing a model
+
+`imageapi.py` speaks OpenAI-compatible `chat/completions`, so the endpoint is config:
+`GENERATE_API_URL` (default `https://openrouter.ai/api/v1`) and `GENERATE_MODEL`
+(default `google/gemini-2.5-flash-image`). Any server with that shape works, a local one
+included — `GENERATE_API_URL=http://localhost:1234/v1`.
+
+`chat/completions` rather than a dedicated images endpoint because this prompt sends
+**captioned** references (`IMAGE 1 (positive…)`, `IMAGE 2 (negative, do NOT copy)`), and
+only a messages array keeps text and images interleaved in that order.
+
+The hard requirement on a model is the magenta ground: the prompt asks for the bird on a
+flat `#FF00FF` backing because no image model emits alpha, and `matte.py` removes it
+afterwards. A model that ignores the instruction produces a magenta rectangle, not a
+cutout — `validate.sh` warns on a fully-opaque image, which is the symptom.
 
 `--matte` calls into `matte.py` in-process, so the cutout happens before the render is
 ever written under its real filename. That ordering is deliberate: the output directory
@@ -63,8 +81,9 @@ then takes the background to be the magenta region **connected to the frame bord
 plus any pocket as magenta as the ground itself (to catch gaps enclosed by the bird,
 e.g. between an owl's talons). The bird's own colours are never altered — only a thin
 edge band is feathered. This is what a global colour key can't do: tell ground-pink
-from a red bill, or keep warm tones (Gemini also paints a per-image, slightly
-non-uniform rose, which `matte.py` auto-detects from a border ring).
+from a red bill, or keep warm tones (models tend to paint a per-image, slightly
+non-uniform rose rather than exactly `#FF00FF`, which `matte.py` auto-detects from a
+border ring).
 
 `matte.py` needs no rembg / onnxruntime / ~1 GB model — the reason the runtime image
 dropped from a Debian + baked-model build to `nginx:alpine`. Correctness is covered

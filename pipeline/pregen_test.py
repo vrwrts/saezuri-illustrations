@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Unit tests for pregen's notes layering and render writing (no network, no
-generation).
+"""Unit tests for pregen's notes layering, prompt assembly, and render writing
+(no network, no generation).
 
 Run directly so pipeline/ is on sys.path for `import pregen`:
     python3 pipeline/pregen_test.py
 """
+import base64
 import io
 import json
 import tempfile
@@ -13,6 +14,7 @@ from pathlib import Path
 
 from PIL import Image
 
+import imageapi
 import pregen
 
 
@@ -33,6 +35,83 @@ def magenta_render(size=(200, 200), blob=(70, 130)) -> bytes:
     buf = io.BytesIO()
     im.save(buf, "PNG")
     return buf.getvalue()
+
+
+class GenOne(unittest.TestCase):
+    """gen_one's own job: substitute the prompt and assemble captioned parts in
+    the order the anti-reference instructions assume. The transport itself is
+    covered in imageapi_test.py, so the call is intercepted here."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        self.captured = {}
+
+        def fake_chat(api_url, api_key, model, parts, **kwargs):
+            self.captured = dict(api_url=api_url, api_key=api_key, model=model,
+                                 parts=parts, kwargs=kwargs)
+            b64 = base64.b64encode(magenta_render()).decode()
+            return {"choices": [{"message": {"images": [
+                {"image_url": {"url": f"data:image/png;base64,{b64}"}}]}}]}
+
+        real_chat = imageapi.chat
+        imageapi.chat = fake_chat
+        self.addCleanup(setattr, imageapi, "chat", real_chat)
+
+    def ref(self, name: str) -> Path:
+        p = self.d / name
+        p.write_bytes(magenta_render(size=(20, 20), blob=(5, 15)))
+        return p
+
+    def call(self, **kwargs):
+        return pregen.gen_one(
+            "http://endpoint/v1", "k", "some/model",
+            "Draw a {com_name} ({sci_name}), {pose}.\n{anti_ref_line}",
+            "Turdus merula", "Eurasian Blackbird", 1, **kwargs)
+
+    def texts(self):
+        return [p["text"] for p in self.captured["parts"] if p["type"] == "text"]
+
+    def test_returns_the_image_and_asks_for_one(self):
+        data = self.call()
+        self.assertTrue(data.startswith(b"\x89PNG"))
+        self.assertTrue(self.captured["kwargs"]["want_image"])
+        self.assertEqual(self.captured["model"], "some/model")
+
+    def test_substitutes_the_prompt_placeholders(self):
+        self.call()
+        body = self.texts()[0]
+        self.assertIn("Eurasian Blackbird", body)
+        self.assertIn("Turdus merula", body)
+        self.assertIn("perched", body)
+        self.assertNotIn("{", body)
+
+    def test_species_note_is_appended(self):
+        self.call(species_note="Solid glossy black, orange-yellow bill.")
+        self.assertIn("Species-specific note: Solid glossy black", self.texts()[0])
+
+    def test_references_are_captioned_in_order(self):
+        self.call(positive_ref=self.ref("pos.png"),
+                  anti_ref=self.ref("_anti_bluejay.jpg"),
+                  anti_ref_key="bluejay",
+                  style_ref=self.ref("style.jpg"))
+        kinds = [p["type"] for p in self.captured["parts"]]
+        # prompt, then a caption immediately before each of the three images.
+        self.assertEqual(kinds, ["text", "text", "image_url",
+                                 "text", "image_url", "text", "image_url"])
+        captions = self.texts()[1:]
+        self.assertTrue(captions[0].startswith("IMAGE 1"))
+        self.assertTrue(captions[1].startswith("IMAGE 2"))
+        self.assertTrue(captions[2].startswith("IMAGE 3"))
+
+    def test_anti_reference_caption_names_the_attached_lookalike(self):
+        self.call(anti_ref=self.ref("_anti_bluejay.jpg"), anti_ref_key="bluejay")
+        caption = next(t for t in self.texts() if t.startswith("IMAGE 2"))
+        self.assertIn(pregen.ANTI_REFS["bluejay"]["common_name"], caption)
+
+    def test_no_anti_reference_leaves_the_prompt_bullet_empty(self):
+        self.call()
+        self.assertEqual(len(self.captured["parts"]), 1)
+        self.assertNotIn("IMAGE 2", self.texts()[0])
 
 
 class LoadSpeciesNotes(unittest.TestCase):

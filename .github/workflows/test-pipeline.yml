@@ -22,3 +22,4 @@ jobs:
           python matte_test.py
           python worker_test.py
           python pregen_test.py
+          python imageapi_test.py

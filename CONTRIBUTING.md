@@ -5,7 +5,12 @@ Add birds by generating them **with your own API keys**, committing the PNGs to
 
 ## Prerequisites
 
-- A **Google AI (Gemini) API key** — generation uses the paid image API against *your* key.
+- An **API key for an image model** — generation goes through any OpenAI-compatible
+  `chat/completions` endpoint against *your* key. The default is
+  [OpenRouter](https://openrouter.ai) with `google/gemini-2.5-flash-image`; point
+  `GENERATE_API_URL` elsewhere (including a local server) and `GENERATE_MODEL` at another model
+  if you prefer. Note the prompt asks the model to paint on a flat magenta ground that the matte
+  step removes — a model that ignores that gives you a magenta rectangle, so check your output.
 - An **eBird API key** — to filter a species list down to a region (optional but recommended).
 - A **labels file** — a superset species list to filter (e.g. BirdNET-Pi's `labels.txt`, or any
   file of `Scientific name_Common name` / `Sci|Com` lines).
@@ -14,7 +19,8 @@ Add birds by generating them **with your own API keys**, committing the PNGs to
 ## Generate, then PR
 
 ```bash
-export GEMINI_API_KEY=...   EBIRD_API_KEY=...        # your keys — you pay for generation
+export GENERATE_API_KEY=...  EBIRD_API_KEY=...        # your keys — you pay for generation
+# optional: export GENERATE_API_URL=http://localhost:1234/v1  GENERATE_MODEL=some/model
 python3 pipeline/pregen.py --labels labels.txt --ebird-region GB --out illustrations   # step 1: render
 for f in illustrations/*.png; do                                                        # step 2: cut out
   python3 pipeline/matte.py --region "$f" --out "$f"

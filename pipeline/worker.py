@@ -36,8 +36,10 @@ Usage:
     python3 worker.py --repair
 
 Env:
-    GEMINI_API_KEY   required for --generate; unset => error (the service only
+    GENERATE_API_KEY required for --generate; unset => error (the service only
                      calls --generate when a key is set).
+    GENERATE_API_URL OpenAI-compatible endpoint, GENERATE_MODEL the model. Read
+                     by pregen itself; see imageapi.py for the defaults.
     GENERATE_SLEEP   seconds between image-API calls (passed to pregen --sleep).
                      Only bites when one invocation covers several images; the
                      refresh service asks for one pose at a time and paces the
@@ -51,6 +53,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import imageapi
 # slugify is the canonical scientific-name -> filename join key, kept in parity
 # with the frontend (src/domain/slug.ts) and the rest of the pipeline.
 from pregen import BUNDLED_NOTES, slugify
@@ -128,7 +131,6 @@ def generate(
     missing: list[tuple[str, str, str]],
     assets_dir: Path,
     refs_dir: Path,
-    gemini_key: str,
     poses: list[int],
     notes_paths: list[Path],
     force: bool = False,
@@ -147,7 +149,7 @@ def generate(
         args += ["--notes", str(notes_path)]
     if force:
         args += ["--force"]
-    # Throttle image-API calls to stay within the Gemini free-tier rate limit.
+    # Throttle image-API calls to stay within the provider's rate limit.
     # Only bites when this invocation covers more than one image; the refresh
     # service calls us one pose at a time and paces the calls itself.
     sleep = os.environ.get("GENERATE_SLEEP", "").strip()
@@ -156,8 +158,9 @@ def generate(
     for sci, com, _ in missing:
         args += ["--species", f"{sci}|{com}"]
     args += ["--poses", *[str(p) for p in poses]]
-    env = {**os.environ, "GEMINI_API_KEY": gemini_key}
-    _run(args, env=env)
+    # No env splice: pregen resolves the endpoint, key, and model from the same
+    # environment this process already has.
+    _run(args)
 
 
 def repair(assets_dir: Path) -> int:
@@ -250,9 +253,12 @@ def main() -> int:
         print("saezuri-worker: manifest rebuilt")
         return 0
 
-    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not gemini_key:
-        print("saezuri-worker: GEMINI_API_KEY unset; cannot generate", file=sys.stderr)
+    # Resolved here only to fail before any work is done; pregen reads the same
+    # environment and settles it again for the call itself.
+    try:
+        imageapi.resolve(None, None, None, imageapi.DEFAULT_IMAGE_MODEL)
+    except imageapi.ConfigError as e:
+        print(f"saezuri-worker: cannot generate — {e}", file=sys.stderr)
         return 2
 
     if args.max_per_cycle > 0 and len(species) > args.max_per_cycle:
@@ -263,7 +269,7 @@ def main() -> int:
     # tweak wins without having to restate what the pipeline already knows.
     notes_paths = [BUNDLED_NOTES, *(args.notes or [])]
     missing = [(sci, com, slugify(sci)) for sci, com in species]
-    generate(missing, assets_dir, refs_dir, gemini_key,
+    generate(missing, assets_dir, refs_dir,
              poses=args.poses, notes_paths=notes_paths, force=args.force)
     # Count the poses that actually landed, not the species: the service asks for
     # one pose at a time, so a species count would read 0/1 for a flight render.

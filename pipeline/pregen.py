@@ -10,8 +10,8 @@ Step 1 of the illustration pipeline:
 
 Reads a species list (BirdNET-Pi's labels.txt, eBird, or stdin),
 fetches a Wikipedia reference photo for each species, and generates an
-illustration via the Gemini 2.5 Flash Image API. Saves PNGs into
-avian/assets/illustrations/.
+illustration through an OpenAI-compatible image model (OpenRouter by
+default; see imageapi.py). Saves PNGs into avian/assets/illustrations/.
 
 The prompt renders each bird on a flat MAGENTA ground, not a transparent one:
 the model can't cut transparency cleanly, but a distinct known ground is
@@ -28,7 +28,7 @@ Reference photos:
     or <slug>.png BEFORE running and pregen.py will use that instead.
 
 Contrastive anti-reference:
-    For genera where Gemini's prior collapses to a more famous
+    For genera where an image model's prior collapses to a more famous
     lookalike, the script attaches a photo of that lookalike as a
     negative reference and rewrites the prompt body to tell the model
     NOT to copy the lookalike's diagnostic features. Currently wired:
@@ -52,11 +52,12 @@ Usage:
     # Re-render everything after a prompt change:
     python3 pregen.py --labels ~/BirdNET-Pi/model/labels.txt --force
 
-Set GEMINI_API_KEY in the environment (preferred) or pass --gemini-key.
+Set GENERATE_API_KEY in the environment (preferred) or pass --api-key.
+GENERATE_API_URL and GENERATE_MODEL choose the endpoint and model; the
+defaults are OpenRouter and google/gemini-2.5-flash-image (see imageapi.py).
 """
 from __future__ import annotations
 import argparse
-import base64
 import json
 import os
 import re
@@ -67,19 +68,15 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-# Gemini's image-out model. The endpoint changes occasionally; if you
-# get a 404 here, check Google's model catalog and bump this.
-GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-2.5-flash-image:generateContent"
-)
+import imageapi
+
 POSES = {1: "perched", 2: "in flight with wings spread"}
 
 # The community prompt-addenda layer, shipped with the pipeline. An operator's
 # own notes file is layered over this one (see load_species_notes).
 BUNDLED_NOTES = Path(__file__).resolve().parent / "species-notes.json"
 
-# Genera where Gemini's prior collapses to Blue Jay markings unless we
+# Genera where an image model's prior collapses to Blue Jay markings unless we
 # attach a Blue Jay anti-reference. Add to this set if you find another
 # blue-songbird genus that needs the contrastive nudge.
 JAY_GENERA = {
@@ -87,19 +84,19 @@ JAY_GENERA = {
     "Garrulus", "Cyanocorax", "Gymnorhinus",
 }
 
-# Genera where Gemini's prior collapses to Barn Swallow (rufous throat,
+# Genera where the prior collapses to Barn Swallow (rufous throat,
 # deeply forked tail) unless we attach a Barn Swallow anti-reference.
 # Hirundo rustica is itself the Barn Swallow so it's excluded.
 SWALLOW_GENERA = {
     "Tachycineta", "Riparia", "Progne", "Petrochelidon", "Stelgidopteryx",
 }
 
-# Genera where Gemini's prior collapses to American Robin (gray back,
+# Genera where the prior collapses to American Robin (gray back,
 # orange breast) for ground-foraging thrushes. Add as needed.
 ROBIN_GENERA = set()  # placeholder for future use
 
 # Anti-reference catalogue. Each entry describes one lookalike species
-# that Gemini collapses to: the common/scientific names go in IMAGE 2's
+# that the model collapses to: the common/scientific names go in IMAGE 2's
 # caption and the prompt-body bullet, and `do_not_copy` is the list of
 # its diagnostic features the model must avoid. The key matches the
 # `_anti_<key>.jpg` filename in the references directory and feeds into
@@ -288,8 +285,8 @@ def fetch_wikipedia_thumb(sci: str, com: str) -> tuple[bytes, str] | None:
 
     Returns (bytes, ext) where ext is '.jpg' or '.png' sniffed from the
     magic bytes - Wikipedia's infobox image can be either, and shipping
-    PNG bytes labeled as JPEG to Gemini gets the reference silently
-    rejected. Returns None if no usable image. Pi-friendly: pulls a
+    PNG bytes labeled as JPEG gets the reference silently rejected by
+    the model API. Returns None if no usable image. Pi-friendly: pulls a
     1024-wide thumbnail via the REST summary endpoint (a few KB to MB,
     not the original-sized image).
     """
@@ -317,7 +314,7 @@ def fetch_wikipedia_thumb(sci: str, com: str) -> tuple[bytes, str] | None:
             except (urllib.error.HTTPError, urllib.error.URLError):
                 continue
             # Magic-byte sniff - URL extension is a hint, the bytes are
-            # what Gemini's MIME check sees. Skip unknown formats rather
+            # what the API's MIME check sees. Skip unknown formats rather
             # than mis-label them.
             if data.startswith(b"\x89PNG\r\n\x1a\n"):
                 return data, ".png"
@@ -331,8 +328,8 @@ def ensure_reference(refs_dir: Path, slug: str, sci: str, com: str) -> Path | No
     None if Wikipedia had no usable image. Pre-existing references (e.g.
     hand-picked Audubon plates dropped in by the user as either
     <slug>.jpg or <slug>.png) are respected; the file is saved with the
-    extension that matches its actual format so _mime_for ships the
-    right MIME to Gemini."""
+    extension that matches its actual format so imageapi.mime_for ships
+    the right MIME."""
     refs_dir.mkdir(parents=True, exist_ok=True)
     for ext in REF_EXTS:
         cached = refs_dir / f"{slug}{ext}"
@@ -348,7 +345,7 @@ def ensure_reference(refs_dir: Path, slug: str, sci: str, com: str) -> Path | No
 
 
 def select_anti_ref_key(sci: str) -> str | None:
-    """Return the ANTI_REFS key for the lookalike that Gemini drifts
+    """Return the ANTI_REFS key for the lookalike the model drifts
     toward for this species, or None if no anti-ref is needed. The key
     matches `_anti_<key>.jpg` in the references directory."""
     genus = sci.split()[0]
@@ -432,7 +429,7 @@ def load_anti_ref(refs_dir: Path, key: str = "bluejay") -> Path | None:
     return p if p.exists() else None
 
 
-# ---- Gemini call ----
+# ---- image-model call ----
 
 def _anti_ref_line(anti_ref_key: str | None) -> str:
     """Render the `{anti_ref_line}` substitution for the prompt body.
@@ -451,7 +448,9 @@ def _anti_ref_line(anti_ref_key: str | None) -> str:
 
 
 def gen_one(
+    api_url: str,
     api_key: str,
+    model: str,
     prompt: str,
     sci: str,
     com: str,
@@ -462,8 +461,7 @@ def gen_one(
     species_note: str | None = None,
     style_ref: Path | None = None,
 ) -> bytes:
-    """Single Gemini call with bounded retry on 429 + transient 5xx.
-    Returns raw PNG bytes.
+    """One image-model call, retried by imageapi.chat. Returns raw image bytes.
 
     positive_ref: Wikipedia/Audubon photo of the target species.
     anti_ref: lookalike photo to attach as IMAGE 2. The companion
@@ -484,7 +482,7 @@ def gen_one(
     if species_note:
         body = body + "\n\nSpecies-specific note: " + species_note
 
-    parts: list[dict] = [{"text": body}]
+    parts: list[dict] = [imageapi.text_part(body)]
     if positive_ref:
         # Downscale the anatomy reference to 384px on the long side
         # before encoding. Big Wikipedia photos visually dominate as a
@@ -505,130 +503,30 @@ def gen_one(
             ref_mime = "image/png"
         except Exception:
             ref_bytes = positive_ref.read_bytes()
-            ref_mime = _mime_for(positive_ref)
-        parts.append({"text": "IMAGE 1 (positive, target species):"})
-        parts.append({"inline_data": {
-            "mime_type": ref_mime,
-            "data": base64.b64encode(ref_bytes).decode(),
-        }})
+            ref_mime = imageapi.mime_for(positive_ref)
+        parts.append(imageapi.text_part("IMAGE 1 (positive, target species):"))
+        parts.append(imageapi.image_part(ref_bytes, ref_mime))
     if anti_ref:
         anti_name = (ANTI_REFS.get(anti_ref_key or "") or {}).get(
             "common_name", "lookalike species"
         )
-        parts.append({"text": f"IMAGE 2 (negative, {anti_name}, do NOT copy):"})
-        parts.append({"inline_data": {
-            "mime_type": _mime_for(anti_ref),
-            "data": base64.b64encode(anti_ref.read_bytes()).decode(),
-        }})
+        parts.append(imageapi.text_part(
+            f"IMAGE 2 (negative, {anti_name}, do NOT copy):"))
+        parts.append(imageapi.image_part(
+            anti_ref.read_bytes(), imageapi.mime_for(anti_ref)))
     if style_ref:
-        parts.append({"text": (
+        parts.append(imageapi.text_part(
             "IMAGE 3 (positive STYLE reference - Edo-period kachō-e woodblock "
             "print). The species in IMAGE 3 is irrelevant; only its painting "
             "technique is borrowed (flat washes, confident outlines, tonal "
             "mineral-pigment ground). DO NOT copy any branches, leaves, water, "
-            "moon, or scenery from IMAGE 3.")})
-        parts.append({"inline_data": {
-            "mime_type": _mime_for(style_ref),
-            "data": base64.b64encode(style_ref.read_bytes()).decode(),
-        }})
+            "moon, or scenery from IMAGE 3."))
+        parts.append(imageapi.image_part(
+            style_ref.read_bytes(), imageapi.mime_for(style_ref)))
 
-    payload = {
-        "contents": [{"parts": parts}],
-        # TEXT included so Gemini can surface safety messaging without
-        # rejecting the request shape (image-only sometimes errors).
-        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
-    }
-    # API key as header, NOT URL - keeps the key out of Google's
-    # request logs, proxy logs, and shell history.
-    req = urllib.request.Request(
-        GEMINI_URL,
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
-
-    backoff = 4.0
-    for attempt in range(4):
-        try:
-            with urllib.request.urlopen(req, timeout=180) as r:
-                resp = json.loads(r.read())
-            break
-        except urllib.error.HTTPError as e:
-            # Read the body once for a human-readable reason (quota id, message,
-            # retry delay) - Gemini puts the useful detail there, not in the
-            # status line.
-            detail = _http_error_detail(e)
-            if e.code in (429, 500, 502, 503, 504) and attempt < 3:
-                ra = e.headers.get("Retry-After")
-                try:
-                    retry_after = float(ra) if ra else backoff
-                except (TypeError, ValueError):
-                    retry_after = backoff  # HTTP-date format, fall back
-                print(f"    [retry] {com} {POSES[pose]}: HTTP {e.code} {detail} "
-                      f"- waiting {retry_after:.0f}s (attempt {attempt + 1}/4)",
-                      file=sys.stderr)
-                time.sleep(retry_after)
-                backoff *= 2
-                continue
-            raise RuntimeError(f"HTTP {e.code}: {detail}")
-        except urllib.error.URLError as e:
-            if attempt < 3:
-                print(f"    [retry] {com} {POSES[pose]}: {e.reason} - waiting "
-                      f"{backoff:.0f}s (attempt {attempt + 1}/4)", file=sys.stderr)
-                time.sleep(backoff)
-                backoff *= 2
-                continue
-            raise
-
-    for cand in resp.get("candidates", []):
-        for part in cand.get("content", {}).get("parts", []):
-            inline = part.get("inlineData") or part.get("inline_data")
-            if inline and inline.get("data"):
-                return base64.b64decode(inline["data"])
-    # No image - surface the blocking reason so users know what to fix.
-    finish = (resp.get("candidates", [{}])[0]).get("finishReason", "?")
-    block = resp.get("promptFeedback", {}).get("blockReason", "")
-    raise RuntimeError(f"no image (finish={finish} block={block})")
-
-
-def _mime_for(p: Path) -> str:
-    ext = p.suffix.lower()
-    if ext in (".jpg", ".jpeg"):
-        return "image/jpeg"
-    if ext == ".png":
-        return "image/png"
-    if ext == ".webp":
-        return "image/webp"
-    return "application/octet-stream"
-
-
-def _http_error_detail(e: urllib.error.HTTPError) -> str:
-    """Best-effort concise reason from a Gemini error body: the API message
-    (first line) plus any quota ids and retry delay - e.g. the free-tier
-    `limit: 0` case shows up as `GenerateRequestsPerDayPerProjectPerModel-
-    FreeTier`, which points straight at billing rather than pacing. Falls back
-    to the HTTP reason when the body isn't the JSON shape we expect. Reads the
-    body, so call at most once per exception."""
-    try:
-        body = e.read().decode("utf-8", "replace")
-    except Exception:
-        return e.reason or str(e.code)
-    try:
-        err = json.loads(body)["error"]
-    except (ValueError, KeyError, TypeError):
-        snippet = " ".join(body.split())[:200]
-        return snippet or e.reason or str(e.code)
-    parts = [(err.get("message") or "").split("\n", 1)[0].strip()]
-    tags: list[str] = []
-    for d in err.get("details", []):
-        kind = d.get("@type", "")
-        if kind.endswith("QuotaFailure"):
-            tags += [v["quotaId"] for v in d.get("violations", []) if v.get("quotaId")]
-        elif kind.endswith("RetryInfo") and d.get("retryDelay"):
-            tags.append(f"retry {d['retryDelay']}")
-    if tags:
-        parts.append(f"[{'; '.join(tags)}]")
-    return " ".join(p for p in parts if p) or e.reason or str(e.code)
+    resp = imageapi.chat(api_url, api_key, model, parts, want_image=True,
+                         label=f"{com} {POSES[pose]}")
+    return imageapi.first_image(resp)
 
 
 def main() -> int:
@@ -643,7 +541,13 @@ def main() -> int:
     src.add_argument("--stdin", action="store_true", help="Read Sci|Com lines from stdin")
     ap.add_argument("--ebird-region", help="eBird region code (e.g. US-CA, US-CA-085) to filter labels")
     ap.add_argument("--ebird-key", help="eBird API key (or EBIRD_API_KEY env)")
-    ap.add_argument("--gemini-key", help="Gemini API key (or GEMINI_API_KEY env)")
+    ap.add_argument("--api-key", help=f"API key (or {imageapi.ENV_API_KEY} env)")
+    ap.add_argument("--api-url",
+                    help=f"OpenAI-compatible base URL (or {imageapi.ENV_API_URL} env; "
+                         f"default {imageapi.DEFAULT_API_URL})")
+    ap.add_argument("--model",
+                    help=f"Image model (or {imageapi.ENV_MODEL} env; "
+                         f"default {imageapi.DEFAULT_IMAGE_MODEL})")
     ap.add_argument("--out", type=Path,
                     default=Path(__file__).resolve().parents[1] / "assets" / "illustrations",
                     help="Output directory (default: avian/assets/illustrations/)")
@@ -678,9 +582,11 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="Cap species count for testing")
     args = ap.parse_args()
 
-    gemini_key = args.gemini_key or os.environ.get("GEMINI_API_KEY", "")
-    if not gemini_key:
-        print("error: GEMINI_API_KEY required (--gemini-key or env)", file=sys.stderr)
+    try:
+        api_url, api_key, model = imageapi.resolve(
+            args.api_key, args.api_url, args.model, imageapi.DEFAULT_IMAGE_MODEL)
+    except imageapi.ConfigError as e:
+        print(f"error: {e}", file=sys.stderr)
         return 2
 
     # Build species list
@@ -732,7 +638,8 @@ def main() -> int:
         print(f"[notes] loaded per-species addenda for {len(notes)} species")
 
     total = len(species) * len(args.poses)
-    print(f"generating up to {total} illustrations into {args.out}/")
+    print(f"generating up to {total} illustrations into {args.out}/ "
+          f"({model} via {api_url})")
     for key, p in anti_paths.items():
         print(f"[refs] {ANTI_REFS[key]['common_name']} anti-reference: {p.name}")
 
@@ -762,7 +669,7 @@ def main() -> int:
                 style_ref_path = args.styles / select_style_ref(sci, pose)
                 if not style_ref_path.exists():
                     style_ref_path = None
-                data = gen_one(gemini_key, prompt, sci, com, pose,
+                data = gen_one(api_url, api_key, model, prompt, sci, com, pose,
                                positive_ref=pos_ref, anti_ref=anti,
                                anti_ref_key=anti_key_for_call,
                                species_note=note_for(notes, sci),
