@@ -168,7 +168,7 @@ LARGE_FLIGHT_GENERA = {
     "Urile","Ardea","Egretta","Bubulcus","Butorides","Nycticorax","Plegadis",
     "Limosa","Numenius","Himantopus","Recurvirostra",
     "Buteo","Accipiter","Aquila","Circus","Falco","Cathartes","Coragyps",
-    "Haliaeetus","Pandion","Elanus","Gymnogyps","Corvus",
+    "Haliaeetus","Pandion","Elanus","Gymnogyps","Corvus","Coloeus",
 }
 
 
