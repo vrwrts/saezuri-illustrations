@@ -138,7 +138,7 @@ GENUS_STYLE_PERCHED = {
     "Passerina":"vivid_perched","Cardellina":"vivid_perched",
     "Setophaga":"vivid_perched","Icteria":"vivid_perched",
     # Corvids + vultures (dark perching)
-    "Corvus":"dark_bird_perched","Coragyps":"dark_bird_perched",
+    "Corvus":"dark_bird_perched","Coloeus":"dark_bird_perched","Coragyps":"dark_bird_perched",
     "Cathartes":"dark_bird_perched","Gymnogyps":"dark_bird_perched",
     # Waterfowl perched (mandarin-ducks anchor)
     "Anas":"waterfowl_perched","Aix":"waterfowl_perched","Mareca":"waterfowl_perched",
@@ -168,7 +168,7 @@ LARGE_FLIGHT_GENERA = {
     "Urile","Ardea","Egretta","Bubulcus","Butorides","Nycticorax","Plegadis",
     "Limosa","Numenius","Himantopus","Recurvirostra",
     "Buteo","Accipiter","Aquila","Circus","Falco","Cathartes","Coragyps",
-    "Haliaeetus","Pandion","Elanus","Gymnogyps","Corvus",
+    "Haliaeetus","Pandion","Elanus","Gymnogyps","Corvus","Coloeus",
 }
 
 
