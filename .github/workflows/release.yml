@@ -32,6 +32,6 @@ jobs:
       # can attach it (tar of the pipeline/ dir → app unpacks it to /opt/saezuri/pipeline).
       - name: Package pipeline
         run: tar czf pipeline.tar.gz pipeline
-      - uses: cycjimmy/semantic-release-action@v4
+      - uses: cycjimmy/semantic-release-action@v8
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
