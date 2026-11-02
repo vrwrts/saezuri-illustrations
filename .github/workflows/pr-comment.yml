@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download the lint report
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: lint-report
           run-id: ${{ github.event.workflow_run.id }}
