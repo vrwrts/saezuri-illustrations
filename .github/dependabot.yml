@@ -1,0 +1,23 @@
+version: 2
+
+# chore commits never cut a pipeline release; updates ship with the next feat/fix.
+updates:
+  - package-ecosystem: pip
+    directory: /pipeline
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: chore(deps)
+    groups:
+      pipeline:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: chore(ci)
+    groups:
+      actions:
+        update-types: [minor, patch]
