@@ -36,7 +36,7 @@ jobs:
           comment-author: 'github-actions[bot]'
           body-includes: '<!-- illustration-lint -->'
       - name: Create or update the sticky comment
-        uses: peter-evans/create-or-update-comment@v4
+        uses: peter-evans/create-or-update-comment@v5
         with:
           comment-id: ${{ steps.found.outputs.comment-id }}
           issue-number: ${{ steps.meta.outputs.pr }}
