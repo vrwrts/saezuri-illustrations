@@ -6,6 +6,8 @@ updates:
     directory: /pipeline
     schedule:
       interval: monthly
+    # Only raise a cap when a new major falls outside it; never bump the floors.
+    versioning-strategy: increase-if-necessary
     commit-message:
       prefix: chore(deps)
     groups:

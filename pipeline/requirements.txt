@@ -3,6 +3,10 @@
 # gracefully without it. matte.py needs numpy + scipy (region-based cutout,
 # no ML model). build_masks.py needs Pillow. verify.py is standard-library
 # only.
-Pillow>=10.0
-numpy>=1.24
-scipy>=1.10
+#
+# Capped below the next major: the saezuri image installs the newest version in
+# range on every build, so a new major must arrive as a tested Dependabot PR, not
+# silently. Floors stay low so contributors on older Python can still install.
+Pillow>=10.0,<14
+numpy>=1.24,<3
+scipy>=1.10,<2
