@@ -75,7 +75,7 @@ jobs:
           exit "$rc" # fail the check on errors (warnings pass)
       - name: Upload report for the comment workflow
         if: always() # also upload when the lint step failed, so the comment shows the errors
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lint-report
           path: |
