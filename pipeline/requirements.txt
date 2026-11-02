@@ -4,5 +4,5 @@
 # no ML model). build_masks.py needs Pillow. verify.py is standard-library
 # only.
 Pillow>=10.0
-numpy>=1.24
+numpy>=2.5.4
 scipy>=1.10
